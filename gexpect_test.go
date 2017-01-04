@@ -1,23 +1,25 @@
-// +build !windows
-
 package gexpect
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"strings"
 	"testing"
 	"time"
 )
 
+func mockExpectFromString(buffer string) *ExpectIO {
+	b := bytes.NewBufferString(buffer)
+	return NewExpectIO(b, b)
+}
+
 func TestEmptySearchString(t *testing.T) {
 	t.Logf("Testing empty search string...")
-	child, err := Spawn("echo Hello World")
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = child.Expect("")
+	exp := mockExpectFromString("Hello World")
+	err := exp.Expect("")
 	if err != ErrEmptySearch {
 		t.Fatalf("Expected empty search error, got %v", err)
 	}
@@ -25,11 +27,8 @@ func TestEmptySearchString(t *testing.T) {
 
 func TestHelloWorld(t *testing.T) {
 	t.Logf("Testing Hello World... ")
-	child, err := Spawn("echo \"Hello World\"")
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = child.Expect("Hello World")
+	exp := mockExpectFromString("Hello World")
+	err := exp.Expect("Hello World")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,19 +36,16 @@ func TestHelloWorld(t *testing.T) {
 
 func TestDoubleHelloWorld(t *testing.T) {
 	t.Logf("Testing Double Hello World... ")
-	child, err := Spawn(`sh -c "echo Hello World ; echo Hello ; echo Hi"`)
+	exp := mockExpectFromString("Hello World\nHello\nHi")
+	err := exp.Expect("Hello World")
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = child.Expect("Hello World")
+	err = exp.Expect("Hello")
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = child.Expect("Hello")
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = child.Expect("Hi")
+	err = exp.Expect("Hi")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,11 +53,8 @@ func TestDoubleHelloWorld(t *testing.T) {
 
 func TestHelloWorldFailureCase(t *testing.T) {
 	t.Logf("Testing Hello World Failure case... ")
-	child, err := Spawn("echo \"Hello World\"")
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = child.Expect("YOU WILL NEVER FIND ME")
+	exp := mockExpectFromString("Hello World")
+	err := exp.Expect("YOU WILL NEVER FIND ME")
 	if err != nil {
 		return
 	}
@@ -71,11 +64,12 @@ func TestHelloWorldFailureCase(t *testing.T) {
 func TestBiChannel(t *testing.T) {
 
 	t.Logf("Testing BiChannel screen... ")
-	child, err := Spawn("cat")
-	if err != nil {
-		t.Fatal(err)
-	}
-	sender, receiver := child.AsyncInteractChannels()
+
+	pipeReader, pipeWriter := io.Pipe()
+
+	exp := NewExpectIO(pipeReader, pipeWriter)
+
+	sender, receiver := exp.AsyncInteractChannels()
 	wait := func(str string) {
 		for {
 			msg, open := <-receiver
@@ -93,20 +87,6 @@ func TestBiChannel(t *testing.T) {
 	wait("echo")
 	sender <- fmt.Sprintf("echo2%v", endlChar)
 	wait("echo2")
-	child.Close()
-	child.Wait()
-}
-
-func TestCommandStart(t *testing.T) {
-	t.Logf("Testing Command... ")
-
-	// Doing this allows you to modify the cmd struct prior to execution, for example to add environment variables
-	child, err := Command("echo 'Hello World'")
-	if err != nil {
-		t.Fatal(err)
-	}
-	child.Start()
-	child.Expect("Hello World")
 }
 
 var regexMatchTests = []struct {
@@ -127,11 +107,8 @@ func TestRegexMatch(t *testing.T) {
 	for _, tt := range regexMatchTests {
 		runTest := func(input string) bool {
 			var match bool
-			child, err := Spawn("echo \"" + input + "\"")
-			if err != nil {
-				t.Fatal(err)
-			}
-			match, err = child.ExpectRegex(tt.re)
+			exp := mockExpectFromString(input)
+			match, err := exp.ExpectRegex(tt.re)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -163,11 +140,8 @@ func TestRegexFind(t *testing.T) {
 	t.Logf("Testing Regular Expression Search... ")
 	for _, tt := range regexFindTests {
 		runTest := func(input string) []string {
-			child, err := Spawn("echo \"" + input + "\"")
-			if err != nil {
-				t.Fatal(err)
-			}
-			matches, err := child.ExpectRegexFind(tt.re)
+			exp := mockExpectFromString(input)
+			matches, err := exp.ExpectRegexFind(tt.re)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -191,12 +165,9 @@ func TestRegexFind(t *testing.T) {
 func TestReadLine(t *testing.T) {
 	t.Logf("Testing ReadLine...")
 
-	child, err := Spawn("echo \"foo\nbar\"")
+	exp := mockExpectFromString("foo\r\nbar\r\n")
 
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := child.ReadLine()
+	s, err := exp.ReadLine()
 
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +175,7 @@ func TestReadLine(t *testing.T) {
 	if s != "foo\r" {
 		t.Fatalf("expected 'foo\\r', got '%s'", s)
 	}
-	s, err = child.ReadLine()
+	s, err = exp.ReadLine()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,12 +188,10 @@ func TestRegexWithOutput(t *testing.T) {
 	t.Logf("Testing Regular Expression search with output...")
 
 	s := "You will not find me"
-	p, err := Spawn("echo -n " + s)
-	if err != nil {
-		t.Fatalf("Cannot exec rkt: %v", err)
-	}
+	exp := mockExpectFromString(s)
+
 	searchPattern := `I should not find you`
-	result, out, err := p.ExpectRegexFindWithOutput(searchPattern)
+	result, out, err := exp.ExpectRegexFindWithOutput(searchPattern)
 	if err == nil {
 		t.Fatalf("Shouldn't have found `%v` in `%v`", searchPattern, out)
 	}
@@ -230,23 +199,12 @@ func TestRegexWithOutput(t *testing.T) {
 		t.Fatalf("Child output didn't match: %s", out)
 	}
 
-	err = p.Wait()
-	if err != nil {
-		t.Fatalf("Child didn't terminate correctly: %v", err)
-	}
+	exp = mockExpectFromString("You will find me\r\n")
 
-	p, err = Spawn("echo You will find me")
-	if err != nil {
-		t.Fatalf("Cannot exec rkt: %v", err)
-	}
 	searchPattern = `.*(You will).*`
-	result, out, err = p.ExpectRegexFindWithOutput(searchPattern)
+	result, out, err = exp.ExpectRegexFindWithOutput(searchPattern)
 	if err != nil || result[1] != "You will" {
 		t.Fatalf("Did not find pattern `%v` in `%v'\n", searchPattern, out)
-	}
-	err = p.Wait()
-	if err != nil {
-		t.Fatalf("Child didn't terminate correctly: %v", err)
 	}
 }
 
@@ -256,12 +214,17 @@ func TestRegexTimeoutWithOutput(t *testing.T) {
 	seconds := 2
 	timeout := time.Duration(seconds-1) * time.Second
 
-	p, err := Spawn(fmt.Sprintf("sh -c 'sleep %d && echo You find me'", seconds))
-	if err != nil {
-		t.Fatalf("Cannot exec rkt: %v", err)
-	}
+	pipeReader, pipeWriter := io.Pipe()
+
+	exp := NewExpectIO(pipeReader, nil)
+
+	go func() {
+		time.Sleep(time.Duration(seconds) * time.Second)
+		pipeWriter.Write([]byte("You find me\n"))
+	}()
+
 	searchPattern := `find me`
-	result, out, err := p.ExpectTimeoutRegexFindWithOutput(searchPattern, timeout)
+	result, out, err := exp.ExpectTimeoutRegexFindWithOutput(searchPattern, timeout)
 	if err == nil {
 		t.Fatalf("Shouldn't have finished call with result: %v", result)
 	}
@@ -269,12 +232,16 @@ func TestRegexTimeoutWithOutput(t *testing.T) {
 	seconds = 2
 	timeout = time.Duration(seconds+1) * time.Second
 
-	p, err = Spawn(fmt.Sprintf("sh -c 'sleep %d && echo You find me'", seconds))
-	if err != nil {
-		t.Fatalf("Cannot exec rkt: %v", err)
-	}
+	pipeReader, pipeWriter = io.Pipe()
+	exp = NewExpectIO(pipeReader, nil)
+
+	go func() {
+		time.Sleep(time.Duration(seconds) * time.Second)
+		pipeWriter.Write([]byte("You find me\n"))
+	}()
+
 	searchPattern = `find me`
-	result, out, err = p.ExpectTimeoutRegexFindWithOutput(searchPattern, timeout)
+	result, out, err = exp.ExpectTimeoutRegexFindWithOutput(searchPattern, timeout)
 	if err != nil {
 		t.Fatalf("Didn't find %v in output: %v", searchPattern, out)
 	}
@@ -292,7 +259,7 @@ func TestRegexFindNoExcessBytes(t *testing.T) {
 	}{
 		{
 			desc:           `matching lines line by line with $ at the end of the regexp`,
-			loopBody:       `echo "prefix: ${i} line"`,
+			loopBody:       "prefix: %d line\n",
 			searchPattern:  `(?m)^prefix:\s+(\d+) line\s??$`,
 			expectFullTmpl: `prefix: %d line`,
 			unmatchedData:  "\n",
@@ -302,36 +269,32 @@ func TestRegexFindNoExcessBytes(t *testing.T) {
 		},
 		{
 			desc:           `matching lines line by line with \n at the end of the regexp`,
-			loopBody:       `echo "prefix: ${i} line"`,
+			loopBody:       "prefix: %d line\r\n",
 			searchPattern:  `(?m)^prefix:\s+(\d+) line\s??\n`,
 			expectFullTmpl: `prefix: %d line`,
 			unmatchedData:  "",
 		},
 		{
 			desc:           `matching chunks in single line chunk by chunk`,
-			loopBody:       `printf "a ${i} b"`,
+			loopBody:       "a %d b",
 			searchPattern:  `a\s+(\d+)\s+b`,
 			expectFullTmpl: `a %d b`,
 			unmatchedData:  "",
 		},
 	}
-	seqCmd := fmt.Sprintf("`seq 1 %d`", repeats)
-	shCmdTmpl := fmt.Sprintf(`sh -c 'for i in %s; do %%s; done'`, seqCmd)
+
 	for _, tt := range tests {
 		t.Logf("Test: %s", tt.desc)
-		shCmd := fmt.Sprintf(shCmdTmpl, tt.loopBody)
-		t.Logf("Running command: %s", shCmd)
-		p, err := Spawn(shCmd)
-		if err != nil {
-			t.Fatalf("Cannot exec shell script: %v", err)
-		}
-		defer func() {
-			if err := p.Wait(); err != nil {
-				t.Fatalf("shell script didn't terminate correctly: %v", err)
-			}
-		}()
+
+		var buf bytes.Buffer
 		for i := 1; i <= repeats; i++ {
-			matches, output, err := p.ExpectRegexFindWithOutput(tt.searchPattern)
+			buf.WriteString(fmt.Sprintf(tt.loopBody, i))
+		}
+
+		exp := NewExpectIO(&buf, &buf)
+
+		for i := 1; i <= repeats; i++ {
+			matches, output, err := exp.ExpectRegexFindWithOutput(tt.searchPattern)
 			if err != nil {
 				t.Fatalf("Failed to get the match number %d: %v", i, err)
 			}
@@ -401,7 +364,7 @@ func TestBufferReadRune(t *testing.T) {
 		}
 
 		// new buffer
-		buf := buffer{f: f, b: *bytes.NewBuffer(tt.bufferContent)}
+		buf := buffer{rw: bufio.NewReadWriter(bufio.NewReader(f), bufio.NewWriter(f)), b: *bytes.NewBuffer(tt.bufferContent)}
 
 		// call ReadRune
 		r, size, err := buf.ReadRune()

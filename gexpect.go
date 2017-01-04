@@ -1,162 +1,38 @@
-// +build !windows
-
 package gexpect
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
 	"regexp"
 	"time"
 	"unicode/utf8"
-
-	shell "github.com/kballard/go-shellquote"
-	"github.com/kr/pty"
 )
 
 var (
 	ErrEmptySearch = errors.New("empty search string")
 )
 
-type ExpectSubprocess struct {
-	Cmd          *exec.Cmd
+func NewExpectIO(in io.Reader, out io.Writer) *ExpectIO {
+	wrapper := new(ExpectIO)
+
+	wrapper.outputBuffer = nil
+
+	wrapper.buf = new(buffer)
+
+	wrapper.buf.rw = bufio.NewReadWriter(bufio.NewReader(in), bufio.NewWriter(out))
+
+	return wrapper
+}
+
+type ExpectIO struct {
 	buf          *buffer
 	outputBuffer []byte
 }
 
-type buffer struct {
-	f       *os.File
-	b       bytes.Buffer
-	collect bool
-
-	collection bytes.Buffer
-}
-
-func (buf *buffer) StartCollecting() {
-	buf.collect = true
-}
-
-func (buf *buffer) StopCollecting() (result string) {
-	result = string(buf.collection.Bytes())
-	buf.collect = false
-	buf.collection.Reset()
-	return result
-}
-
-func (buf *buffer) Read(chunk []byte) (int, error) {
-	nread := 0
-	if buf.b.Len() > 0 {
-		n, err := buf.b.Read(chunk)
-		if err != nil {
-			return n, err
-		}
-		if n == len(chunk) {
-			return n, nil
-		}
-		nread = n
-	}
-	fn, err := buf.f.Read(chunk[nread:])
-	return fn + nread, err
-}
-
-func (buf *buffer) ReadRune() (r rune, size int, err error) {
-	l := buf.b.Len()
-
-	chunk := make([]byte, utf8.UTFMax)
-	if l > 0 {
-		n, err := buf.b.Read(chunk)
-		if err != nil {
-			return 0, 0, err
-		}
-		if utf8.FullRune(chunk[:n]) {
-			r, rL := utf8.DecodeRune(chunk)
-			if n > rL {
-				buf.PutBack(chunk[rL:n])
-			}
-			if buf.collect {
-				buf.collection.WriteRune(r)
-			}
-			return r, rL, nil
-		}
-	}
-	// else add bytes from the file, then try that
-	for l < utf8.UTFMax {
-		fn, err := buf.f.Read(chunk[l : l+1])
-		if err != nil {
-			return 0, 0, err
-		}
-		l = l + fn
-
-		if utf8.FullRune(chunk[:l]) {
-			r, rL := utf8.DecodeRune(chunk)
-			if buf.collect {
-				buf.collection.WriteRune(r)
-			}
-			return r, rL, nil
-		}
-	}
-	return 0, 0, errors.New("File is not a valid UTF=8 encoding")
-}
-
-func (buf *buffer) PutBack(chunk []byte) {
-	if len(chunk) == 0 {
-		return
-	}
-	if buf.b.Len() == 0 {
-		buf.b.Write(chunk)
-		return
-	}
-	d := make([]byte, 0, len(chunk)+buf.b.Len())
-	d = append(d, chunk...)
-	d = append(d, buf.b.Bytes()...)
-	buf.b.Reset()
-	buf.b.Write(d)
-}
-
-func SpawnAtDirectory(command string, directory string) (*ExpectSubprocess, error) {
-	expect, err := _spawn(command)
-	if err != nil {
-		return nil, err
-	}
-	expect.Cmd.Dir = directory
-	return _start(expect)
-}
-
-func Command(command string) (*ExpectSubprocess, error) {
-	expect, err := _spawn(command)
-	if err != nil {
-		return nil, err
-	}
-	return expect, nil
-}
-
-func (expect *ExpectSubprocess) Start() error {
-	_, err := _start(expect)
-	return err
-}
-
-func Spawn(command string) (*ExpectSubprocess, error) {
-	expect, err := _spawn(command)
-	if err != nil {
-		return nil, err
-	}
-	return _start(expect)
-}
-
-func (expect *ExpectSubprocess) Close() error {
-	if err := expect.Cmd.Process.Kill(); err != nil {
-		return err
-	}
-	if err := expect.buf.f.Close(); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (expect *ExpectSubprocess) AsyncInteractChannels() (send chan string, receive chan string) {
+func (expect *ExpectIO) AsyncInteractChannels() (send chan string, receive chan string) {
 	receive = make(chan string)
 	send = make(chan string)
 
@@ -192,11 +68,11 @@ func (expect *ExpectSubprocess) AsyncInteractChannels() (send chan string, recei
 	return
 }
 
-func (expect *ExpectSubprocess) ExpectRegex(regex string) (bool, error) {
+func (expect *ExpectIO) ExpectRegex(regex string) (bool, error) {
 	return regexp.MatchReader(regex, expect.buf)
 }
 
-func (expect *ExpectSubprocess) expectRegexFind(regex string, output bool) ([]string, string, error) {
+func (expect *ExpectIO) expectRegexFind(regex string, output bool) ([]string, string, error) {
 	re, err := regexp.Compile(regex)
 	if err != nil {
 		return nil, "", err
@@ -227,7 +103,7 @@ func (expect *ExpectSubprocess) expectRegexFind(regex string, output bool) ([]st
 	return result, stringIndexedInto, err
 }
 
-func (expect *ExpectSubprocess) expectTimeoutRegexFind(regex string, timeout time.Duration) (result []string, out string, err error) {
+func (expect *ExpectIO) expectTimeoutRegexFind(regex string, timeout time.Duration) (result []string, out string, err error) {
 	t := make(chan bool)
 	go func() {
 		result, out, err = expect.ExpectRegexFindWithOutput(regex)
@@ -242,21 +118,21 @@ func (expect *ExpectSubprocess) expectTimeoutRegexFind(regex string, timeout tim
 	return result, out, err
 }
 
-func (expect *ExpectSubprocess) ExpectRegexFind(regex string) ([]string, error) {
+func (expect *ExpectIO) ExpectRegexFind(regex string) ([]string, error) {
 	result, _, err := expect.expectRegexFind(regex, false)
 	return result, err
 }
 
-func (expect *ExpectSubprocess) ExpectTimeoutRegexFind(regex string, timeout time.Duration) ([]string, error) {
+func (expect *ExpectIO) ExpectTimeoutRegexFind(regex string, timeout time.Duration) ([]string, error) {
 	result, _, err := expect.expectTimeoutRegexFind(regex, timeout)
 	return result, err
 }
 
-func (expect *ExpectSubprocess) ExpectRegexFindWithOutput(regex string) ([]string, string, error) {
+func (expect *ExpectIO) ExpectRegexFindWithOutput(regex string) ([]string, string, error) {
 	return expect.expectRegexFind(regex, true)
 }
 
-func (expect *ExpectSubprocess) ExpectTimeoutRegexFindWithOutput(regex string, timeout time.Duration) ([]string, string, error) {
+func (expect *ExpectIO) ExpectTimeoutRegexFindWithOutput(regex string, timeout time.Duration) ([]string, string, error) {
 	return expect.expectTimeoutRegexFind(regex, timeout)
 }
 
@@ -289,7 +165,7 @@ func buildKMPTable(searchString string) []int {
 	return table
 }
 
-func (expect *ExpectSubprocess) ExpectTimeout(searchString string, timeout time.Duration) (e error) {
+func (expect *ExpectIO) ExpectTimeout(searchString string, timeout time.Duration) (e error) {
 	result := make(chan error)
 	go func() {
 		result <- expect.Expect(searchString)
@@ -302,7 +178,7 @@ func (expect *ExpectSubprocess) ExpectTimeout(searchString string, timeout time.
 	return e
 }
 
-func (expect *ExpectSubprocess) Expect(searchString string) (e error) {
+func (expect *ExpectIO) Expect(searchString string) (e error) {
 	target := len(searchString)
 	if target < 1 {
 		return ErrEmptySearch
@@ -347,37 +223,36 @@ func (expect *ExpectSubprocess) Expect(searchString string) (e error) {
 	}
 }
 
-func (expect *ExpectSubprocess) Send(command string) error {
-	_, err := io.WriteString(expect.buf.f, command)
-	return err
+func (expect *ExpectIO) Send(command string) error {
+	if _, err := io.WriteString(expect.buf.rw, command); err != nil {
+		return err
+	}
+
+	if err := expect.buf.rw.Flush(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
-func (expect *ExpectSubprocess) Capture() {
+func (expect *ExpectIO) Capture() {
 	if expect.outputBuffer == nil {
 		expect.outputBuffer = make([]byte, 0)
 	}
 }
 
-func (expect *ExpectSubprocess) Collect() []byte {
+func (expect *ExpectIO) Collect() []byte {
 	collectOutput := make([]byte, len(expect.outputBuffer))
 	copy(collectOutput, expect.outputBuffer)
 	expect.outputBuffer = nil
 	return collectOutput
 }
 
-func (expect *ExpectSubprocess) SendLine(command string) error {
-	_, err := io.WriteString(expect.buf.f, command+"\r\n")
-	return err
+func (expect *ExpectIO) SendLine(command string) error {
+	return expect.Send(command + "\r\n")
 }
 
-func (expect *ExpectSubprocess) Interact() {
-	defer expect.Cmd.Wait()
-	io.Copy(os.Stdout, &expect.buf.b)
-	go io.Copy(os.Stdout, expect.buf.f)
-	go io.Copy(expect.buf.f, os.Stdin)
-}
-
-func (expect *ExpectSubprocess) ReadUntil(delim byte) ([]byte, error) {
+func (expect *ExpectIO) ReadUntil(delim byte) ([]byte, error) {
 	join := make([]byte, 0, 512)
 	chunk := make([]byte, 255)
 
@@ -387,7 +262,7 @@ func (expect *ExpectSubprocess) ReadUntil(delim byte) ([]byte, error) {
 		for i := 0; i < n; i++ {
 			if chunk[i] == delim {
 				if len(chunk) > i+1 {
-					expect.buf.PutBack(chunk[i+1:n])
+					expect.buf.PutBack(chunk[i+1 : n])
 				}
 				return join, nil
 			} else {
@@ -401,49 +276,96 @@ func (expect *ExpectSubprocess) ReadUntil(delim byte) ([]byte, error) {
 	}
 }
 
-func (expect *ExpectSubprocess) Wait() error {
-	return expect.Cmd.Wait()
-}
-
-func (expect *ExpectSubprocess) ReadLine() (string, error) {
+func (expect *ExpectIO) ReadLine() (string, error) {
 	str, err := expect.ReadUntil('\n')
 	return string(str), err
 }
 
-func _start(expect *ExpectSubprocess) (*ExpectSubprocess, error) {
-	f, err := pty.Start(expect.Cmd)
-	if err != nil {
-		return nil, err
-	}
-	expect.buf.f = f
+type buffer struct {
+	rw      *bufio.ReadWriter
+	b       bytes.Buffer
+	collect bool
 
-	return expect, nil
+	collection bytes.Buffer
 }
 
-func _spawn(command string) (*ExpectSubprocess, error) {
-	wrapper := new(ExpectSubprocess)
+func (buf *buffer) StartCollecting() {
+	buf.collect = true
+}
 
-	wrapper.outputBuffer = nil
+func (buf *buffer) StopCollecting() (result string) {
+	result = string(buf.collection.Bytes())
+	buf.collect = false
+	buf.collection.Reset()
+	return result
+}
 
-	splitArgs, err := shell.Split(command)
-	if err != nil {
-		return nil, err
+func (buf *buffer) Read(chunk []byte) (int, error) {
+	nread := 0
+	if buf.b.Len() > 0 {
+		n, err := buf.b.Read(chunk)
+		if err != nil {
+			return n, err
+		}
+		if n == len(chunk) {
+			return n, nil
+		}
+		nread = n
 	}
-	numArguments := len(splitArgs) - 1
-	if numArguments < 0 {
-		return nil, errors.New("gexpect: No command given to spawn")
-	}
-	path, err := exec.LookPath(splitArgs[0])
-	if err != nil {
-		return nil, err
-	}
+	fn, err := buf.rw.Read(chunk[nread:])
+	return fn + nread, err
+}
 
-	if numArguments >= 1 {
-		wrapper.Cmd = exec.Command(path, splitArgs[1:]...)
-	} else {
-		wrapper.Cmd = exec.Command(path)
-	}
-	wrapper.buf = new(buffer)
+func (buf *buffer) ReadRune() (r rune, size int, err error) {
+	l := buf.b.Len()
 
-	return wrapper, nil
+	chunk := make([]byte, utf8.UTFMax)
+	if l > 0 {
+		n, err := buf.b.Read(chunk)
+		if err != nil {
+			return 0, 0, err
+		}
+		if utf8.FullRune(chunk[:n]) {
+			r, rL := utf8.DecodeRune(chunk)
+			if n > rL {
+				buf.PutBack(chunk[rL:n])
+			}
+			if buf.collect {
+				buf.collection.WriteRune(r)
+			}
+			return r, rL, nil
+		}
+	}
+	// else add bytes from the file, then try that
+	for l < utf8.UTFMax {
+		fn, err := buf.rw.Read(chunk[l : l+1])
+		if err != nil {
+			return 0, 0, err
+		}
+		l = l + fn
+
+		if utf8.FullRune(chunk[:l]) {
+			r, rL := utf8.DecodeRune(chunk)
+			if buf.collect {
+				buf.collection.WriteRune(r)
+			}
+			return r, rL, nil
+		}
+	}
+	return 0, 0, errors.New("File is not a valid UTF=8 encoding")
+}
+
+func (buf *buffer) PutBack(chunk []byte) {
+	if len(chunk) == 0 {
+		return
+	}
+	if buf.b.Len() == 0 {
+		buf.b.Write(chunk)
+		return
+	}
+	d := make([]byte, 0, len(chunk)+buf.b.Len())
+	d = append(d, chunk...)
+	d = append(d, buf.b.Bytes()...)
+	buf.b.Reset()
+	buf.b.Write(d)
 }
