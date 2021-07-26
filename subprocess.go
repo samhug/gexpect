@@ -9,8 +9,8 @@ import (
 	"os"
 	"os/exec"
 
+	"github.com/creack/pty"
 	shell "github.com/kballard/go-shellquote"
-	"github.com/kr/pty"
 )
 
 type ExpectSubprocess struct {
